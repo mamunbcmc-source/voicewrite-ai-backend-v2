@@ -50,3 +50,6 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
     res.status(500).json({ error: 'Speech-to-text failed.', detail: err.message });
   }
 })
+;
+
+module.exports = router;
