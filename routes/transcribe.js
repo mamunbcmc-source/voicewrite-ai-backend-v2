@@ -26,16 +26,25 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
 
     const audioBytes = req.file.buffer.toString('base64');
 
+    // Defaults match the mobile app's AMR_WB recording. The browser
+    // prototype sends encoding=WEBM_OPUS instead (see apiService.ts) —
+    // WEBM_OPUS carries its own sample rate in the file, so
+    // sampleRateHertz can be omitted for it.
+    const encoding = req.body.encoding || 'AMR_WB';
+    const config = {
+      encoding,
+      languageCode: 'bn-BD',
+      alternativeLanguageCodes: ['en-US'],
+      enableAutomaticPunctuation: true,
+      model: 'default',
+    };
+    if (encoding !== 'WEBM_OPUS') {
+      config.sampleRateHertz = Number(req.body.sampleRateHertz) || 16000;
+    }
+
     const request = {
       audio: { content: audioBytes },
-      config: {
-        encoding: 'AMR_WB', // adjust to match the mobile app's recording format (see README)
-        sampleRateHertz: 16000,
-        languageCode: 'bn-BD',
-        alternativeLanguageCodes: ['en-US'],
-        enableAutomaticPunctuation: true,
-        model: 'default',
-      },
+      config,
     };
 
     const [response] = await client.recognize(request);
@@ -49,7 +58,6 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
     console.error('Transcribe error:', err);
     res.status(500).json({ error: 'Speech-to-text failed.', detail: err.message });
   }
-})
-;
+});
 
 module.exports = router;
