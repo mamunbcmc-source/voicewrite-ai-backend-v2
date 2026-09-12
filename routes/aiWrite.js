@@ -1,14 +1,16 @@
 // POST /api/ai-write
-// Takes the raw transcript + a chosen mode, and asks Claude to turn it into
-// polished writing. This is where "AI নিজের বুদ্ধি দিয়ে summary বা নতুন কথা
-// যোগ করে" happens — the model doesn't just clean up wording, it can
-// genuinely summarize, restructure, or expand based on the instruction.
+// Takes the raw transcript + a chosen mode/instruction and asks an LLM to
+// turn it into polished writing (summary, cleanup, email, MOM, custom
+// instruction, translation, etc — the frontend decides via customInstruction).
+// Uses Groq's free, no-credit-card LLM API (Llama 3.3 70B) instead of the
+// Anthropic API for now. Swappable later — the frontend only cares about
+// { result } coming back.
 
 const express = require('express');
-const Anthropic = require('@anthropic-ai/sdk');
 
 const router = express.Router();
-const anthropic = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const GROQ_CHAT_MODEL = 'llama-3.3-70b-versatile';
 
 const MODE_INSTRUCTIONS = {
   professional: 'এই কথ্য transcript-টিকে একটি পরিমার্জিত, formal ও professional লেখায় রূপান্তর করো। মূল ভাষা (বাংলা/ইংরেজি/মিশ্র) বজায় রাখো।',
@@ -27,23 +29,39 @@ router.post('/ai-write', async (req, res) => {
     if (!transcript || !transcript.trim()) {
       return res.status(400).json({ error: 'transcript is required.' });
     }
+    if (!GROQ_API_KEY) {
+      return res.status(500).json({ error: 'GROQ_API_KEY is not set on the server.' });
+    }
 
     const instruction = mode === 'custom' && customInstruction
       ? customInstruction
       : MODE_INSTRUCTIONS[mode] || MODE_INSTRUCTIONS.cleanup;
 
-    const message = await anthropic.messages.create({
-      model: 'claude-sonnet-4-6',
-      max_tokens: 1500,
-      messages: [
-        {
-          role: 'user',
-          content: `${instruction}\n\nTranscript:\n"""${transcript}"""\n\nশুধু চূড়ান্ত লেখাটি দাও, কোনো preamble ছাড়া।`,
-        },
-      ],
+    const groqRes = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${GROQ_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: GROQ_CHAT_MODEL,
+        max_tokens: 1500,
+        messages: [
+          {
+            role: 'user',
+            content: `${instruction}\n\nTranscript:\n"""${transcript}"""\n\nশুধু চূড়ান্ত লেখাটি দাও, কোনো preamble ছাড়া।`,
+          },
+        ],
+      }),
     });
 
-    const text = message.content.map((b) => b.text || '').join('\n').trim();
+    if (!groqRes.ok) {
+      const errText = await groqRes.text();
+      throw new Error(`Groq chat error ${groqRes.status}: ${errText}`);
+    }
+
+    const data = await groqRes.json();
+    const text = (data.choices?.[0]?.message?.content || '').trim();
     res.json({ result: text });
   } catch (err) {
     console.error('AI write error:', err);
