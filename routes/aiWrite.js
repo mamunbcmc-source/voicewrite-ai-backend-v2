@@ -10,7 +10,7 @@ const express = require('express');
 
 const router = express.Router();
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const GROQ_CHAT_MODEL = 'llama-3.3-70b-versatile';
+const GROQ_CHAT_MODEL = 'openai/gpt-oss-120b'; // llama-3.3-70b-versatile was deprecated by Groq (Jun 2026)
 
 const MODE_INSTRUCTIONS = {
   professional: 'এই কথ্য transcript-টিকে একটি পরিমার্জিত, formal ও professional লেখায় রূপান্তর করো। মূল ভাষা (বাংলা/ইংরেজি/মিশ্র) বজায় রাখো।',
