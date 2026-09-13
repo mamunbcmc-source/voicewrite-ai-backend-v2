@@ -34,9 +34,13 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
     const blob = new Blob([req.file.buffer], { type: req.file.mimetype || 'audio/webm' });
     form.append('file', blob, req.file.originalname || 'audio.webm');
     form.append('model', GROQ_STT_MODEL);
-    // Deliberately no `language` field — this lets Whisper auto-detect
-    // Bangla vs English (or a mix) instead of forcing a single language,
-    // matching the "automatic language detection" the app promises.
+    // NOTE: we force language=bn here. Leaving this blank for Whisper to
+    // auto-detect turned out to misidentify Bangla speech as Hindi quite
+    // often (the two languages sound close enough that Whisper's language
+    // ID gets confused, especially on short/noisy clips) — forcing Bangla
+    // fixes that. Whisper still transcribes English words spoken within
+    // Bangla speech reasonably well even with language pinned to bn.
+    form.append('language', 'bn');
     form.append('response_format', 'json');
 
     const groqRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
