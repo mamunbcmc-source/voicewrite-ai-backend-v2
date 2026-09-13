@@ -16,7 +16,7 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY;
 // "turbo" is faster and still very accurate for Bangla/English; swap to
 // 'whisper-large-v3' (no -turbo) if accuracy ever needs to be prioritized
 // over speed.
-const GROQ_STT_MODEL = 'whisper-large-v3-turbo';
+const GROQ_STT_MODEL = 'whisper-large-v3'; // full-quality model — better accuracy than -turbo, especially for Bangla
 
 router.post('/transcribe', upload.single('audio'), async (req, res) => {
   try {
