@@ -8,8 +8,20 @@
 
 const express = require('express');
 const multer = require('multer');
+const admin = require('firebase-admin');
 
 const router = express.Router();
+
+// Fire-and-forget usage counter — safe no-op until Firebase Admin is
+// actually initialized (FIREBASE_SERVICE_ACCOUNT_JSON set) and the caller
+// is a real signed-in user (not the DEV_MODE_NO_AUTH placeholder).
+function bumpUsage(uid, field) {
+  if (!admin.apps.length || !uid || uid === 'dev-user') return;
+  admin.firestore().collection('users').doc(uid).set(
+    { usage: { [field]: admin.firestore.FieldValue.increment(1) } },
+    { merge: true }
+  ).catch((e) => console.error('usage tracking failed:', e.message));
+}
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
@@ -60,6 +72,7 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
     }
 
     const data = await groqRes.json();
+    bumpUsage(req.uid, 'transcriptions');
     res.json({ transcript: (data.text || '').trim() });
     // NOTE: speaker diarization ("Speaker 1: ...", "Speaker 2: ...") is not
     // available on Groq's free Whisper endpoint — that was a Google Cloud
