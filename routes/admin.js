@@ -23,6 +23,46 @@ async function requireAdmin(req, res, next) {
   }
 }
 
+// POST /api/admin/users — create a new employee account
+router.post('/admin/users', requireAdmin, async (req, res) => {
+  try {
+    const { email, password, name, role } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ error: 'email ও password আবশ্যক।' });
+    }
+    if (password.length < 6) {
+      return res.status(400).json({ error: 'password অন্তত ৬ অক্ষরের হতে হবে।' });
+    }
+    const userRecord = await admin.auth().createUser({
+      email,
+      password,
+      displayName: name || '',
+    });
+    await admin.firestore().collection('users').doc(userRecord.uid).set({
+      email,
+      name: name || '',
+      role: role === 'admin' ? 'admin' : 'employee',
+      active: true,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      usage: { transcriptions: 0, aiWrites: 0 },
+    });
+    res.json({ uid: userRecord.uid });
+  } catch (err) {
+    res.status(500).json({ error: 'User তৈরি করা যায়নি।', detail: err.message });
+  }
+});
+
+// DELETE /api/admin/users/:uid — remove a user entirely (auth + Firestore doc)
+router.delete('/admin/users/:uid', requireAdmin, async (req, res) => {
+  try {
+    await admin.auth().deleteUser(req.params.uid);
+    await admin.firestore().collection('users').doc(req.params.uid).delete();
+    res.json({ ok: true });
+  } catch (err) {
+    res.status(500).json({ error: 'User মুছে ফেলা যায়নি।', detail: err.message });
+  }
+});
+
 // GET /api/admin/users — list all users
 router.get('/admin/users', requireAdmin, async (req, res) => {
   try {
