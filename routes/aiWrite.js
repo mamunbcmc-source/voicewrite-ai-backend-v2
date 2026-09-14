@@ -7,9 +7,18 @@
 // { result } coming back.
 
 const express = require('express');
+const admin = require('firebase-admin');
 
 const router = express.Router();
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
+
+function bumpUsage(uid, field) {
+  if (!admin.apps.length || !uid || uid === 'dev-user') return;
+  admin.firestore().collection('users').doc(uid).set(
+    { usage: { [field]: admin.firestore.FieldValue.increment(1) } },
+    { merge: true }
+  ).catch((e) => console.error('usage tracking failed:', e.message));
+}
 const GROQ_CHAT_MODEL = 'openai/gpt-oss-120b'; // llama-3.3-70b-versatile was deprecated by Groq (Jun 2026)
 
 const MODE_INSTRUCTIONS = {
@@ -62,6 +71,7 @@ router.post('/ai-write', async (req, res) => {
 
     const data = await groqRes.json();
     const text = (data.choices?.[0]?.message?.content || '').trim();
+    bumpUsage(req.uid, 'aiWrites');
     res.json({ result: text });
   } catch (err) {
     console.error('AI write error:', err);
