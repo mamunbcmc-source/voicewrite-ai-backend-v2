@@ -41,6 +41,11 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
     // fixes that. Whisper still transcribes English words spoken within
     // Bangla speech reasonably well even with language pinned to bn.
     form.append('language', 'bn');
+    // A short context "prompt" nudges Whisper's decoding toward plausible,
+    // standard Bangla vocabulary for this kind of speech instead of
+    // hallucinating similar-sounding nonsense words — a free accuracy
+    // improvement, not a guaranteed fix.
+    form.append('prompt', 'এটি একটি বাংলা অফিস মিটিং রেকর্ডিং। কথাবার্তা স্বাভাবিক, কথ্য বাংলায়।');
     form.append('response_format', 'json');
 
     const groqRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
