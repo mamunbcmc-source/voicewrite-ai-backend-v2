@@ -48,7 +48,13 @@ router.post('/admin/users', requireAdmin, async (req, res) => {
     });
     res.json({ uid: userRecord.uid });
   } catch (err) {
-    res.status(500).json({ error: 'User তৈরি করা যায়নি।', detail: err.message });
+    let message = 'User তৈরি করা যায়নি।';
+    if (err.code === 'auth/email-already-exists') {
+      message = 'এই email দিয়ে already একটা account আছে — অন্য email ব্যবহার করুন।';
+    } else if (err.code === 'auth/invalid-email') {
+      message = 'Email-টা সঠিক ফরম্যাটে নেই।';
+    }
+    res.status(500).json({ error: message, detail: err.message });
   }
 });
 
