@@ -25,7 +25,7 @@ app.use(express.json());
 // DEV_MODE_NO_AUTH lets you test /api routes with curl before Firebase is
 // wired up on the mobile side — turn this off before going anywhere near
 // production.
-const DEV_MODE_NO_AUTH = true;
+const DEV_MODE_NO_AUTH = false;
 
 async function requireAuth(req, res, next) {
   if (DEV_MODE_NO_AUTH) {
