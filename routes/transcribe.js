@@ -22,7 +22,10 @@ function bumpUsage(uid, field) {
     { merge: true }
   ).catch((e) => console.error('usage tracking failed:', e.message));
 }
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+// Groq's free-tier Whisper endpoint hard-caps uploads at 25MB — this stays
+// just under that so we get a clear, friendly error from OUR OWN server
+// instead of an opaque one from Groq if a recording is too long.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 24 * 1024 * 1024 } });
 
 const GROQ_API_KEY = process.env.GROQ_API_KEY;
 // "turbo" is faster and still very accurate for Bangla/English; swap to
@@ -83,6 +86,18 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
     console.error('Transcribe error:', err);
     res.status(500).json({ error: 'Speech-to-text failed.', detail: err.message });
   }
+});
+
+// Friendly response for recordings over the 24MB cap (multer's default
+// error is a generic LIMIT_FILE_SIZE code) — this needs to be registered
+// after the route above so it catches errors multer raised for it.
+router.use((err, req, res, next) => {
+  if (err && err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({
+      error: 'এই recording-টা অনেক বড় (২৪ MB-এর বেশি) — একবারে Convert করা যাচ্ছে না। মিটিংটা কয়েকটা ছোট recording-এ ভাগ করে (Stop করে আবার নতুন Recording শুরু করে) প্রতিটা আলাদা Convert করুন।',
+    });
+  }
+  next(err);
 });
 
 module.exports = router;
