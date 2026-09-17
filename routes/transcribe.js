@@ -1,20 +1,35 @@
 // POST /api/transcribe
-// Uses Groq's hosted Whisper API (OpenAI-compatible) to turn a recorded
-// meeting (or an uploaded audio file) into text. Groq's free tier needs no
-// credit card, which is why this is used instead of Google Cloud
-// Speech-to-Text for now — this can be swapped back to Google Cloud (or
-// any other provider) later without touching the frontend, since the
-// request/response shape the app expects ({ transcript }) stays the same.
+// Uses Sarvam AI's Batch Speech-to-Text API (Saaras model) — a speech
+// recognition model built specifically for Indian languages including
+// Bangla, with strong Bangla+English code-switching support. Chosen over
+// Groq's general-purpose Whisper because Whisper's Bangla accuracy for
+// casual/conversational speech was consistently poor (frequent
+// misrecognized words, occasional Hindi misdetection). Sarvam's free
+// signup credits (no card required) cover a generous amount of testing.
+//
+// This uses the Batch API (not the 30-second-limited REST endpoint) since
+// meeting recordings run well past 30 seconds — Sarvam's Batch API
+// supports audio up to 2 hours long. The whole upload → start → poll →
+// download flow is handled by the official `sarvamai` SDK.
 
 const express = require('express');
 const multer = require('multer');
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const admin = require('firebase-admin');
+const { SarvamAIClient } = require('sarvamai');
 
 const router = express.Router();
+// Sarvam's Batch API documents a 2-hour audio duration limit rather than a
+// specific file-size cap; this stays generous while still protecting the
+// server from wildly oversized uploads.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
+
+const SARVAM_API_KEY = process.env.SARVAM_API_KEY;
 
 // Fire-and-forget usage counter — safe no-op until Firebase Admin is
-// actually initialized (FIREBASE_SERVICE_ACCOUNT_JSON set) and the caller
-// is a real signed-in user (not the DEV_MODE_NO_AUTH placeholder).
+// initialized and the caller is a real signed-in user.
 function bumpUsage(uid, field) {
   if (!admin.apps.length || !uid || uid === 'dev-user') return;
   admin.firestore().collection('users').doc(uid).set(
@@ -22,82 +37,82 @@ function bumpUsage(uid, field) {
     { merge: true }
   ).catch((e) => console.error('usage tracking failed:', e.message));
 }
-// Groq's free-tier Whisper endpoint hard-caps uploads at 25MB — this stays
-// just under that so we get a clear, friendly error from OUR OWN server
-// instead of an opaque one from Groq if a recording is too long.
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 24 * 1024 * 1024 } });
-
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
-// "turbo" is faster and still very accurate for Bangla/English; swap to
-// 'whisper-large-v3' (no -turbo) if accuracy ever needs to be prioritized
-// over speed.
-const GROQ_STT_MODEL = 'whisper-large-v3'; // full-quality model — better accuracy than -turbo, especially for Bangla
 
 router.post('/transcribe', upload.single('audio'), async (req, res) => {
+  let tmpFilePath;
+  let outDir;
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No audio file received.' });
     }
-    if (!GROQ_API_KEY) {
-      return res.status(500).json({ error: 'GROQ_API_KEY is not set on the server.' });
+    if (!SARVAM_API_KEY) {
+      return res.status(500).json({ error: 'SARVAM_API_KEY is not set on the server.' });
     }
 
-    // Groq's endpoint wants a real multipart file upload, not the inline
-    // base64 content Google Cloud STT used — Node 18+'s built-in
-    // FormData/Blob/fetch handle that without any extra dependency.
-    const form = new FormData();
-    const blob = new Blob([req.file.buffer], { type: req.file.mimetype || 'audio/webm' });
-    form.append('file', blob, req.file.originalname || 'audio.webm');
-    form.append('model', GROQ_STT_MODEL);
-    // NOTE: we force language=bn here. Leaving this blank for Whisper to
-    // auto-detect turned out to misidentify Bangla speech as Hindi quite
-    // often (the two languages sound close enough that Whisper's language
-    // ID gets confused, especially on short/noisy clips) — forcing Bangla
-    // fixes that. Whisper still transcribes English words spoken within
-    // Bangla speech reasonably well even with language pinned to bn.
-    form.append('language', 'bn');
-    // A short context "prompt" nudges Whisper's decoding toward plausible,
-    // standard Bangla vocabulary for this kind of speech instead of
-    // hallucinating similar-sounding nonsense words — a free accuracy
-    // improvement, not a guaranteed fix.
-    form.append('prompt', 'এটি একটি বাংলা অফিস মিটিং রেকর্ডিং। কথাবার্তা স্বাভাবিক, কথ্য বাংলায়।');
-    form.append('response_format', 'json');
+    // The SDK's uploadFiles() expects a file path on disk, not a Buffer —
+    // write the uploaded audio to a temp file first.
+    tmpFilePath = path.join(
+      os.tmpdir(),
+      `meeting-${Date.now()}-${Math.random().toString(36).slice(2)}.webm`
+    );
+    fs.writeFileSync(tmpFilePath, req.file.buffer);
 
-    const groqRes = await fetch('https://api.groq.com/openai/v1/audio/transcriptions', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${GROQ_API_KEY}` },
-      body: form,
+    const client = new SarvamAIClient({ apiSubscriptionKey: SARVAM_API_KEY });
+
+    // language_code is pinned to Bangla (not auto-detect) — the same
+    // lesson learned with Groq: auto-detection on casual/short clips was
+    // prone to misidentifying Bangla as a different language.
+    const job = await client.speechToTextJob.createJob({
+      model: 'saaras:v3',
+      mode: 'transcribe',
+      language_code: 'bn-IN',
     });
 
-    if (!groqRes.ok) {
-      const errText = await groqRes.text();
-      throw new Error(`Groq STT error ${groqRes.status}: ${errText}`);
+    await job.uploadFiles({ filePaths: [tmpFilePath] });
+    await job.start();
+    // Kept well under typical platform request-timeout ceilings. Sarvam's
+    // batch jobs usually process much faster than real-time, so this
+    // comfortably covers a good while of meeting audio — but a genuinely
+    // very long recording could still exceed it. If that turns out to be
+    // a real problem in practice, this needs to move to an async
+    // job-id + client-side polling design instead of blocking one request.
+    await job.waitUntilComplete({ pollInterval: 4, timeout: 100 });
+
+    const fileResults = await job.getFileResults();
+    if (!fileResults || !fileResults.successful || !fileResults.successful.length) {
+      const failMsg = fileResults?.failed?.[0]?.error_message || 'transcription job did not complete successfully';
+      throw new Error(failMsg);
     }
 
-    const data = await groqRes.json();
+    outDir = path.join(
+      os.tmpdir(),
+      `sarvam-out-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    );
+    fs.mkdirSync(outDir, { recursive: true });
+    await job.downloadOutputs({ outputDir: outDir });
+
+    const files = fs.readdirSync(outDir).filter((f) => f.endsWith('.json'));
+    let transcript = '';
+    for (const f of files) {
+      const data = JSON.parse(fs.readFileSync(path.join(outDir, f), 'utf-8'));
+      transcript += (data.transcript || '') + ' ';
+    }
+
     bumpUsage(req.uid, 'transcriptions');
-    res.json({ transcript: (data.text || '').trim() });
-    // NOTE: speaker diarization ("Speaker 1: ...", "Speaker 2: ...") is not
-    // available on Groq's free Whisper endpoint — that was a Google Cloud
-    // STT-specific feature. If diarization becomes a hard requirement, this
-    // route would need to move back to Google Cloud STT (or add a separate
-    // diarization step) for that piece specifically.
+    res.json({ transcript: transcript.trim() });
   } catch (err) {
-    console.error('Transcribe error:', err);
-    res.status(500).json({ error: 'Speech-to-text failed.', detail: err.message });
-  }
-});
-
-// Friendly response for recordings over the 24MB cap (multer's default
-// error is a generic LIMIT_FILE_SIZE code) — this needs to be registered
-// after the route above so it catches errors multer raised for it.
-router.use((err, req, res, next) => {
-  if (err && err.code === 'LIMIT_FILE_SIZE') {
-    return res.status(413).json({
-      error: 'এই recording-টা অনেক বড় (২৪ MB-এর বেশি) — একবারে Convert করা যাচ্ছে না। মিটিংটা কয়েকটা ছোট recording-এ ভাগ করে (Stop করে আবার নতুন Recording শুরু করে) প্রতিটা আলাদা Convert করুন।',
+    console.error('Transcribe error (Sarvam):', err);
+    const isTimeout = /timeout/i.test(err.message || '');
+    res.status(500).json({
+      error: isTimeout
+        ? 'Transcription-এ প্রত্যাশার চেয়ে বেশি সময় লাগছে — কিছুক্ষণ পর আবার চেষ্টা করুন, অথবা মিটিংটা ছোট অংশে ভাগ করুন।'
+        : 'Speech-to-text failed.',
+      detail: err.message,
     });
+  } finally {
+    if (tmpFilePath) { try { fs.unlinkSync(tmpFilePath); } catch (e) {} }
+    if (outDir) { try { fs.rmSync(outDir, { recursive: true, force: true }); } catch (e) {} }
   }
-  next(err);
 });
 
 module.exports = router;
