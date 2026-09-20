@@ -1,118 +1,74 @@
 // POST /api/transcribe
-// Uses Sarvam AI's Batch Speech-to-Text API (Saaras model) — a speech
-// recognition model built specifically for Indian languages including
-// Bangla, with strong Bangla+English code-switching support. Chosen over
-// Groq's general-purpose Whisper because Whisper's Bangla accuracy for
-// casual/conversational speech was consistently poor (frequent
-// misrecognized words, occasional Hindi misdetection). Sarvam's free
-// signup credits (no card required) cover a generous amount of testing.
-//
-// This uses the Batch API (not the 30-second-limited REST endpoint) since
-// meeting recordings run well past 30 seconds — Sarvam's Batch API
-// supports audio up to 2 hours long. The whole upload → start → poll →
-// download flow is handled by the official `sarvamai` SDK.
+// Uses ElevenLabs' Speech-to-Text API (Scribe model) to turn a recorded
+// meeting (or an uploaded audio file) into text. Chosen over Groq's free
+// Whisper because Groq's Bangla accuracy on casual/conversational speech
+// was consistently poor (including misidentifying Bangla as Hindi). Chosen
+// over Google Cloud STT and Sarvam AI because it needs no credit card
+// (10,000 free credits/month) and Sarvam is geo-blocked in Bangladesh.
+// ElevenLabs specifically lists Bangladeshi (Dhaka) accent support for
+// Bengali. Response shape stays { transcript } so nothing else changes.
 
 const express = require('express');
 const multer = require('multer');
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
-const admin = require('firebase-admin');
-const { SarvamAIClient } = require('sarvamai');
 
 const router = express.Router();
-// Sarvam's Batch API documents a 2-hour audio duration limit rather than a
-// specific file-size cap; this stays generous while still protecting the
-// server from wildly oversized uploads.
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 100 * 1024 * 1024 } });
+// ElevenLabs doesn't publish a hard file-size cap for this endpoint, but we
+// keep a generous limit here as a sanity check / safety net either way.
+const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 24 * 1024 * 1024 } });
 
-const SARVAM_API_KEY = process.env.SARVAM_API_KEY;
-
-// Fire-and-forget usage counter — safe no-op until Firebase Admin is
-// initialized and the caller is a real signed-in user.
-function bumpUsage(uid, field) {
-  if (!admin.apps.length || !uid || uid === 'dev-user') return;
-  admin.firestore().collection('users').doc(uid).set(
-    { usage: { [field]: admin.firestore.FieldValue.increment(1) } },
-    { merge: true }
-  ).catch((e) => console.error('usage tracking failed:', e.message));
-}
+const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
+// scribe_v1 is the stable, generally-available model; scribe_v2 exists but
+// availability can vary by account — start with v1 for reliability.
+const ELEVENLABS_STT_MODEL = 'scribe_v1';
 
 router.post('/transcribe', upload.single('audio'), async (req, res) => {
-  let tmpFilePath;
-  let outDir;
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No audio file received.' });
     }
-    if (!SARVAM_API_KEY) {
-      return res.status(500).json({ error: 'SARVAM_API_KEY is not set on the server.' });
+    if (!ELEVENLABS_API_KEY) {
+      return res.status(500).json({ error: 'ELEVENLABS_API_KEY is not set on the server.' });
     }
 
-    // The SDK's uploadFiles() expects a file path on disk, not a Buffer —
-    // write the uploaded audio to a temp file first.
-    tmpFilePath = path.join(
-      os.tmpdir(),
-      `meeting-${Date.now()}-${Math.random().toString(36).slice(2)}.webm`
-    );
-    fs.writeFileSync(tmpFilePath, req.file.buffer);
+    const form = new FormData();
+    const blob = new Blob([req.file.buffer], { type: req.file.mimetype || 'audio/webm' });
+    form.append('file', blob, req.file.originalname || 'audio.webm');
+    form.append('model_id', ELEVENLABS_STT_MODEL);
+    // "ben" = Bengali (ISO-639-3). Pinning this (instead of leaving it for
+    // auto-detect) avoids the same Bangla-misidentified-as-Hindi problem we
+    // hit with Groq. Scribe still handles English words spoken within
+    // Bangla speech reasonably well even with the language pinned.
+    form.append('language_code', 'ben');
 
-    const client = new SarvamAIClient({ apiSubscriptionKey: SARVAM_API_KEY });
-
-    // language_code is pinned to Bangla (not auto-detect) — the same
-    // lesson learned with Groq: auto-detection on casual/short clips was
-    // prone to misidentifying Bangla as a different language.
-    const job = await client.speechToTextJob.createJob({
-      model: 'saaras:v3',
-      mode: 'transcribe',
-      language_code: 'bn-IN',
+    const elRes = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {
+      method: 'POST',
+      headers: { 'xi-api-key': ELEVENLABS_API_KEY },
+      body: form,
     });
 
-    await job.uploadFiles({ filePaths: [tmpFilePath] });
-    await job.start();
-    // Kept well under typical platform request-timeout ceilings. Sarvam's
-    // batch jobs usually process much faster than real-time, so this
-    // comfortably covers a good while of meeting audio — but a genuinely
-    // very long recording could still exceed it. If that turns out to be
-    // a real problem in practice, this needs to move to an async
-    // job-id + client-side polling design instead of blocking one request.
-    await job.waitUntilComplete({ pollInterval: 4, timeout: 100 });
-
-    const fileResults = await job.getFileResults();
-    if (!fileResults || !fileResults.successful || !fileResults.successful.length) {
-      const failMsg = fileResults?.failed?.[0]?.error_message || 'transcription job did not complete successfully';
-      throw new Error(failMsg);
+    if (!elRes.ok) {
+      const errText = await elRes.text();
+      throw new Error(`ElevenLabs STT error ${elRes.status}: ${errText}`);
     }
 
-    outDir = path.join(
-      os.tmpdir(),
-      `sarvam-out-${Date.now()}-${Math.random().toString(36).slice(2)}`
-    );
-    fs.mkdirSync(outDir, { recursive: true });
-    await job.downloadOutputs({ outputDir: outDir });
-
-    const files = fs.readdirSync(outDir).filter((f) => f.endsWith('.json'));
-    let transcript = '';
-    for (const f of files) {
-      const data = JSON.parse(fs.readFileSync(path.join(outDir, f), 'utf-8'));
-      transcript += (data.transcript || '') + ' ';
-    }
-
-    bumpUsage(req.uid, 'transcriptions');
-    res.json({ transcript: transcript.trim() });
+    const data = await elRes.json();
+    res.json({ transcript: (data.text || '').trim() });
   } catch (err) {
-    console.error('Transcribe error (Sarvam):', err);
-    const isTimeout = /timeout/i.test(err.message || '');
-    res.status(500).json({
-      error: isTimeout
-        ? 'Transcription-এ প্রত্যাশার চেয়ে বেশি সময় লাগছে — কিছুক্ষণ পর আবার চেষ্টা করুন, অথবা মিটিংটা ছোট অংশে ভাগ করুন।'
-        : 'Speech-to-text failed.',
-      detail: err.message,
-    });
-  } finally {
-    if (tmpFilePath) { try { fs.unlinkSync(tmpFilePath); } catch (e) {} }
-    if (outDir) { try { fs.rmSync(outDir, { recursive: true, force: true }); } catch (e) {} }
+    console.error('Transcribe error:', err);
+    res.status(500).json({ error: 'Speech-to-text failed.', detail: err.message });
   }
+});
+
+// Friendly response for recordings over the multer size cap (multer's
+// default error is a generic LIMIT_FILE_SIZE code) — registered after the
+// route above so it catches errors multer raised for it.
+router.use((err, req, res, next) => {
+  if (err && err.code === 'LIMIT_FILE_SIZE') {
+    return res.status(413).json({
+      error: 'এই recording-টা অনেক বড় — একবারে Convert করা যাচ্ছে না। মিটিংটা কয়েকটা ছোট recording-এ ভাগ করে (Stop করে আবার নতুন Recording শুরু করে) প্রতিটা আলাদা Convert করুন।',
+    });
+  }
+  next(err);
 });
 
 module.exports = router;
