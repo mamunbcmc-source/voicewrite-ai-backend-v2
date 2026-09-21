@@ -40,7 +40,8 @@ async function requireAuth(req, res, next) {
     req.uid = decoded.uid;
     next();
   } catch (err) {
-    res.status(401).json({ error: 'Invalid or expired token.' });
+    console.error('Token verification failed:', err.message);
+    res.status(401).json({ error: 'Invalid or expired token.', detail: err.message });
   }
 }
 
