@@ -17,9 +17,11 @@ const router = express.Router();
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 24 * 1024 * 1024 } });
 
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
-// scribe_v1 is the stable, generally-available model; scribe_v2 exists but
-// availability can vary by account — start with v1 for reliability.
-const ELEVENLABS_STT_MODEL = 'scribe_v1';
+// scribe_v2 is ElevenLabs' current model (scribe_v1 is documented as
+// outclassed by it) and adds smart multi-language support: audio that mixes
+// languages (like Bangla + English in office meetings) is detected and
+// transcribed segment by segment, each in its own language.
+const ELEVENLABS_STT_MODEL = 'scribe_v2';
 
 router.post('/transcribe', upload.single('audio'), async (req, res) => {
   try {
@@ -34,11 +36,11 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
     const blob = new Blob([req.file.buffer], { type: req.file.mimetype || 'audio/webm' });
     form.append('file', blob, req.file.originalname || 'audio.webm');
     form.append('model_id', ELEVENLABS_STT_MODEL);
-    // "ben" = Bengali (ISO-639-3). Pinning this (instead of leaving it for
-    // auto-detect) avoids the same Bangla-misidentified-as-Hindi problem we
-    // hit with Groq. Scribe still handles English words spoken within
-    // Bangla speech reasonably well even with the language pinned.
-    form.append('language_code', 'ben');
+    // No language_code on purpose: with it pinned to Bengali, English words
+    // spoken inside the meeting were being forced into Bangla spelling.
+    // Scribe v2 detects each language in a mixed Bangla/English recording and
+    // writes it in the right script. If Bangla ever gets mislabelled as
+    // another language, restore: form.append('language_code', 'ben');
 
     const elRes = await fetch('https://api.elevenlabs.io/v1/speech-to-text', {
       method: 'POST',
