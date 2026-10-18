@@ -10,11 +10,19 @@
 
 const express = require('express');
 const multer = require('multer');
+const fs = require('fs');
+const os = require('os');
 
 const router = express.Router();
-// ElevenLabs doesn't publish a hard file-size cap for this endpoint, but we
-// keep a generous limit here as a sanity check / safety net either way.
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 24 * 1024 * 1024 } });
+// Large meetings: the upload is streamed to a temp file on disk (not held in
+// RAM — Render's free tier has only ~512MB), then streamed on to ElevenLabs
+// (which accepts up to 3GB / 10 hours). 500MB is our safety cap; at the app's
+// 48kbps recording rate that is roughly 24 hours of audio.
+const MAX_UPLOAD_BYTES = 500 * 1024 * 1024;
+const upload = multer({
+  storage: multer.diskStorage({ destination: os.tmpdir() }),
+  limits: { fileSize: MAX_UPLOAD_BYTES },
+});
 
 const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 // scribe_v2 is ElevenLabs' current model (scribe_v1 is documented as
@@ -24,6 +32,7 @@ const ELEVENLABS_API_KEY = process.env.ELEVENLABS_API_KEY;
 const ELEVENLABS_STT_MODEL = 'scribe_v2';
 
 router.post('/transcribe', upload.single('audio'), async (req, res) => {
+  const tmpPath = req.file && req.file.path;
   try {
     if (!req.file) {
       return res.status(400).json({ error: 'No audio file received.' });
@@ -33,7 +42,12 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
     }
 
     const form = new FormData();
-    const blob = new Blob([req.file.buffer], { type: req.file.mimetype || 'audio/webm' });
+    const mime = req.file.mimetype || 'audio/webm';
+    // fs.openAsBlob reads lazily from disk (Node >= 19.8); fall back to a
+    // full read on older Node.
+    const blob = typeof fs.openAsBlob === 'function'
+      ? await fs.openAsBlob(tmpPath, { type: mime })
+      : new Blob([fs.readFileSync(tmpPath)], { type: mime });
     form.append('file', blob, req.file.originalname || 'audio.webm');
     form.append('model_id', ELEVENLABS_STT_MODEL);
     // No language_code on purpose: with it pinned to Bengali, English words
@@ -58,6 +72,8 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
   } catch (err) {
     console.error('Transcribe error:', err);
     res.status(500).json({ error: 'Speech-to-text failed.', detail: err.message });
+  } finally {
+    if (tmpPath) fs.unlink(tmpPath, () => {});
   }
 });
 
@@ -67,7 +83,7 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
 router.use((err, req, res, next) => {
   if (err && err.code === 'LIMIT_FILE_SIZE') {
     return res.status(413).json({
-      error: 'এই recording-টা অনেক বড় — একবারে Convert করা যাচ্ছে না। মিটিংটা কয়েকটা ছোট recording-এ ভাগ করে (Stop করে আবার নতুন Recording শুরু করে) প্রতিটা আলাদা Convert করুন।',
+      error: 'এই recording-টা ৫০০ MB-এর বেশি বড় — একবারে Convert করা যাচ্ছে না। মিটিংটা কয়েকটা অংশে ভাগ করে (Stop করে আবার নতুন Recording শুরু করে) প্রতিটা আলাদা Convert করুন।',
     });
   }
   next(err);
