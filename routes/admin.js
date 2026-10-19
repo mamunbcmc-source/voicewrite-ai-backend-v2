@@ -61,6 +61,9 @@ router.post('/admin/users', requireAdmin, async (req, res) => {
 // DELETE /api/admin/users/:uid — remove a user entirely (auth + Firestore doc)
 router.delete('/admin/users/:uid', requireAdmin, async (req, res) => {
   try {
+    if (req.params.uid === req.uid) {
+      return res.status(400).json({ error: 'নিজের account নিজে মুছে ফেলা যাবে না।' });
+    }
     await admin.auth().deleteUser(req.params.uid);
     await admin.firestore().collection('users').doc(req.params.uid).delete();
     res.json({ ok: true });
@@ -80,18 +83,68 @@ router.get('/admin/users', requireAdmin, async (req, res) => {
   }
 });
 
-// PATCH /api/admin/users/:uid — update role / active status
+// PATCH /api/admin/users/:uid — update name / email / password / role / active
 router.patch('/admin/users/:uid', requireAdmin, async (req, res) => {
   try {
     const { uid } = req.params;
-    const { role, active } = req.body;
+    const isSelf = uid === req.uid;
+    const body = req.body || {};
+    const name = typeof body.name === 'string' ? body.name.trim() : undefined;
+    const email = typeof body.email === 'string' ? body.email.trim() : undefined;
+    const password = typeof body.password === 'string' ? body.password.trim() : undefined;
+    const role = body.role;
+    const active = body.active;
+
+    if (role !== undefined && role !== 'admin' && role !== 'employee') {
+      return res.status(400).json({ error: 'Role শুধু admin বা employee হতে পারে।' });
+    }
+    if (email !== undefined && !email) {
+      return res.status(400).json({ error: 'Email খালি রাখা যাবে না।' });
+    }
+    if (password !== undefined && password.length < 6) {
+      return res.status(400).json({ error: 'password অন্তত ৬ অক্ষরের হতে হবে।' });
+    }
+    // Safety: an admin cannot lock themselves out of the Admin Panel.
+    if (isSelf && ((role !== undefined && role !== 'admin') || active === false)) {
+      return res.status(400).json({ error: 'নিজের account-এর Role বদলানো বা Suspend করা যাবে না।' });
+    }
+
+    // 1) Firebase Authentication (email / password / display name)
+    const authUpdate = {};
+    if (email !== undefined) authUpdate.email = email;
+    if (password !== undefined) authUpdate.password = password;
+    if (name !== undefined) authUpdate.displayName = name;
+    if (Object.keys(authUpdate).length) {
+      await admin.auth().updateUser(uid, authUpdate);
+      // After a password change, sign the employee out everywhere so the old
+      // password stops working immediately (not for the admin's own session).
+      if (password !== undefined && !isSelf) {
+        await admin.auth().revokeRefreshTokens(uid);
+      }
+    }
+
+    // 2) Firestore profile (what the app reads for name / role / active)
     const update = {};
-    if (role) update.role = role;
+    if (name !== undefined) update.name = name;
+    if (email !== undefined) update.email = email;
+    if (role !== undefined) update.role = role;
     if (typeof active === 'boolean') update.active = active;
-    await admin.firestore().collection('users').doc(uid).set(update, { merge: true });
+    if (Object.keys(update).length) {
+      await admin.firestore().collection('users').doc(uid).set(update, { merge: true });
+    }
     res.json({ ok: true });
   } catch (err) {
-    res.status(500).json({ error: 'User update ব্যর্থ হয়েছে।', detail: err.message });
+    let message = 'User update ব্যর্থ হয়েছে।';
+    if (err.code === 'auth/email-already-exists') {
+      message = 'এই email দিয়ে already আরেকটা account আছে — অন্য email দিন।';
+    } else if (err.code === 'auth/invalid-email') {
+      message = 'Email-টা সঠিক ফরম্যাটে নেই।';
+    } else if (err.code === 'auth/invalid-password') {
+      message = 'Password গ্রহণযোগ্য নয় — অন্তত ৬ অক্ষর দিন।';
+    } else if (err.code === 'auth/user-not-found') {
+      message = 'এই user আর পাওয়া যাচ্ছে না।';
+    }
+    res.status(500).json({ error: message, detail: err.message });
   }
 });
 
