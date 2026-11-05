@@ -50,6 +50,9 @@ router.post('/transcribe', upload.single('audio'), async (req, res) => {
       : new Blob([fs.readFileSync(tmpPath)], { type: mime });
     form.append('file', blob, req.file.originalname || 'audio.webm');
     form.append('model_id', ELEVENLABS_STT_MODEL);
+    // Plain words only: stop ElevenLabs from inserting sound-event tags such as
+    // "(laughter)" or "(footsteps)" into the transcript.
+    form.append('tag_audio_events', 'false');
     // No language_code on purpose: with it pinned to Bengali, English words
     // spoken inside the meeting were being forced into Bangla spelling.
     // Scribe v2 detects each language in a mixed Bangla/English recording and
